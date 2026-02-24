@@ -84,7 +84,7 @@ class Queries(object):
             try:
                 async with self.semaphore:
                     r_async = await self.session.get(
-                        f"https://api.github.com/user/{path}",
+                        f"https://api.github.com/{path}",
                         headers=headers,
                         params=tuple(params.items()),
                     )
@@ -102,7 +102,7 @@ class Queries(object):
                 # Fall back on non-async requests
                 async with self.semaphore:
                     r_requests = requests.get(
-                        f"https://api.github.com/user/{path}",
+                        f"https://api.github.com/{path}",
                         headers=headers,
                         params=tuple(params.items()),
                     )
