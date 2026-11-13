@@ -1,24 +1,15 @@
 #!/usr/bin/python3
 
 import asyncio
+import datetime as dt
 import os
-from typing import Dict, List, Optional, Set, Tuple, Any, cast
+from typing import Any, Dict, List, Optional, Set, Tuple, cast
 
 import aiohttp
 import requests
 
 
-###############################################################################
-# Main Classes
-###############################################################################
-
-
 class Queries(object):
-    """
-    Class with functions to query the GitHub GraphQL (v4) API and the REST (v3)
-    API. Also includes functions to dynamically generate GraphQL queries.
-    """
-
     def __init__(
         self,
         username: str,
@@ -32,12 +23,6 @@ class Queries(object):
         self.semaphore = asyncio.Semaphore(max_connections)
 
     async def query(self, generated_query: str) -> Dict:
-        """
-        Make a request to the GraphQL API using the authentication token from
-        the environment
-        :param generated_query: string query to be sent to the API
-        :return: decoded GraphQL JSON output
-        """
         headers = {
             "Authorization": f"Bearer {self.access_token}",
         }
@@ -51,9 +36,8 @@ class Queries(object):
             result = await r_async.json()
             if result is not None:
                 return result
-        except:
+        except Exception:
             print("aiohttp failed for GraphQL query")
-            # Fall back on non-async requests
             async with self.semaphore:
                 r_requests = requests.post(
                     "https://api.github.com/graphql",
@@ -66,13 +50,6 @@ class Queries(object):
         return dict()
 
     async def query_rest(self, path: str, params: Optional[Dict] = None) -> Dict:
-        """
-        Make a request to the REST API
-        :param path: API path to query
-        :param params: Query parameters to be passed to the API
-        :return: deserialized REST JSON output
-        """
-
         for _ in range(60):
             headers = {
                 "Authorization": f"token {self.access_token}",
@@ -89,17 +66,15 @@ class Queries(object):
                         params=tuple(params.items()),
                     )
                 if r_async.status == 202:
-                    # print(f"{path} returned 202. Retrying...")
-                    print(f"A path returned 202. Retrying...")
+                    print("A path returned 202. Retrying...")
                     await asyncio.sleep(2)
                     continue
 
                 result = await r_async.json()
                 if result is not None:
                     return result
-            except:
+            except Exception:
                 print("aiohttp failed for rest query")
-                # Fall back on non-async requests
                 async with self.semaphore:
                     r_requests = requests.get(
                         f"https://api.github.com/{path}",
@@ -107,12 +82,11 @@ class Queries(object):
                         params=tuple(params.items()),
                     )
                     if r_requests.status_code == 202:
-                        print(f"A path returned 202. Retrying...")
+                        print("A path returned 202. Retrying...")
                         await asyncio.sleep(2)
                         continue
                     elif r_requests.status_code == 200:
                         return r_requests.json()
-        # print(f"There were too many 202s. Data for {path} will be incomplete.")
         print("There were too many 202s. Data for this repository will be incomplete.")
         return dict()
 
@@ -120,9 +94,6 @@ class Queries(object):
     def repos_overview(
         contrib_cursor: Optional[str] = None, owned_cursor: Optional[str] = None
     ) -> str:
-        """
-        :return: GraphQL query with overview of user repositories
-        """
         return f"""{{
   viewer {{
     login,
@@ -199,9 +170,6 @@ class Queries(object):
 
     @staticmethod
     def contrib_years() -> str:
-        """
-        :return: GraphQL query to get all years the user has been a contributor
-        """
         return """
 query {
   viewer {
@@ -214,10 +182,6 @@ query {
 
     @staticmethod
     def contribs_by_year(year: str) -> str:
-        """
-        :param year: year to query for
-        :return: portion of a GraphQL query with desired info for a given year
-        """
         return f"""
     year{year}: contributionsCollection(
         from: "{year}-01-01T00:00:00Z",
@@ -225,16 +189,18 @@ query {
     ) {{
       contributionCalendar {{
         totalContributions
+        weeks {{
+          contributionDays {{
+            date
+            contributionCount
+          }}
+        }}
       }}
     }}
 """
 
     @classmethod
     def all_contribs(cls, years: List[str]) -> str:
-        """
-        :param years: list of years to get contributions for
-        :return: query to retrieve contribution information for all user years
-        """
         by_years = "\n".join(map(cls.contribs_by_year, years))
         return f"""
 query {{
@@ -244,12 +210,36 @@ query {{
 }}
 """
 
+    @staticmethod
+    def calendar() -> str:
+        return """
+query {
+  viewer {
+    contributionsCollection {
+      totalCommitContributions
+      totalPullRequestContributions
+      totalPullRequestReviewContributions
+      totalIssueContributions
+      totalRepositoryContributions
+      restrictedContributionsCount
+      contributionCalendar {
+        totalContributions
+        weeks {
+          contributionDays {
+            date
+            weekday
+            contributionCount
+            contributionLevel
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
 
 class Stats(object):
-    """
-    Retrieve and store statistics about GitHub usage.
-    """
-
     def __init__(
         self,
         username: str,
@@ -269,24 +259,27 @@ class Stats(object):
         self._stargazers: Optional[int] = None
         self._forks: Optional[int] = None
         self._total_contributions: Optional[int] = None
+        self._daily: Optional[Dict[str, int]] = None
+        self._years: List[int] = []
+        self._collection: Optional[Dict[str, Any]] = None
         self._languages: Optional[Dict[str, Any]] = None
         self._repos: Optional[Set[str]] = None
         self._lines_changed: Optional[Tuple[int, int]] = None
         self._views: Optional[int] = None
 
     async def to_str(self) -> str:
-        """
-        :return: summary of all available statistics
-        """
         languages = await self.languages_proportional
         formatted_languages = "\n  - ".join(
             [f"{k}: {v:0.4f}%" for k, v in languages.items()]
         )
         lines_changed = await self.lines_changed
+        current, longest = await self.streaks
         return f"""Name: {await self.name}
 Stargazers: {await self.stargazers:,}
 Forks: {await self.forks:,}
 All-time contributions: {await self.total_contributions:,}
+Current streak: {current} days
+Longest streak: {longest} days
 Repositories with contributions: {len(await self.repos)}
 Lines of code added: {lines_changed[0]:,}
 Lines of code deleted: {lines_changed[1]:,}
@@ -296,9 +289,6 @@ Languages:
   - {formatted_languages}"""
 
     async def get_stats(self) -> None:
-        """
-        Get lots of summary statistics using one big query. Sets many attributes
-        """
         self._stargazers = 0
         self._forks = 0
         self._languages = dict()
@@ -374,17 +364,12 @@ Languages:
             else:
                 break
 
-        # TODO: Improve languages to scale by number of contributions to
-        #       specific filetypes
         langs_total = sum([v.get("size", 0) for v in self._languages.values()])
         for k, v in self._languages.items():
-            v["prop"] = 100 * (v.get("size", 0) / langs_total)
+            v["prop"] = 100 * (v.get("size", 0) / langs_total) if langs_total else 0
 
     @property
     async def name(self) -> str:
-        """
-        :return: GitHub user's name (e.g., Jacob Strieb)
-        """
         if self._name is not None:
             return self._name
         await self.get_stats()
@@ -393,9 +378,6 @@ Languages:
 
     @property
     async def stargazers(self) -> int:
-        """
-        :return: total number of stargazers on user's repos
-        """
         if self._stargazers is not None:
             return self._stargazers
         await self.get_stats()
@@ -404,9 +386,6 @@ Languages:
 
     @property
     async def forks(self) -> int:
-        """
-        :return: total number of forks on user's repos
-        """
         if self._forks is not None:
             return self._forks
         await self.get_stats()
@@ -415,9 +394,6 @@ Languages:
 
     @property
     async def languages(self) -> Dict:
-        """
-        :return: summary of languages used by the user
-        """
         if self._languages is not None:
             return self._languages
         await self.get_stats()
@@ -426,9 +402,6 @@ Languages:
 
     @property
     async def languages_proportional(self) -> Dict:
-        """
-        :return: summary of languages used by the user, with proportional usage
-        """
         if self._languages is None:
             await self.get_stats()
             assert self._languages is not None
@@ -437,9 +410,6 @@ Languages:
 
     @property
     async def repos(self) -> Set[str]:
-        """
-        :return: list of names of user's repos
-        """
         if self._repos is not None:
             return self._repos
         await self.get_stats()
@@ -448,13 +418,11 @@ Languages:
 
     @property
     async def total_contributions(self) -> int:
-        """
-        :return: count of user's total contributions as defined by GitHub
-        """
         if self._total_contributions is not None:
             return self._total_contributions
 
         self._total_contributions = 0
+        self._daily = {}
         years = (
             (await self.queries.query(Queries.contrib_years()))
             .get("data", {})
@@ -462,6 +430,7 @@ Languages:
             .get("contributionsCollection", {})
             .get("contributionYears", [])
         )
+        self._years = [int(y) for y in years]
         by_year = (
             (await self.queries.query(Queries.all_contribs(years)))
             .get("data", {})
@@ -469,16 +438,83 @@ Languages:
             .values()
         )
         for year in by_year:
-            self._total_contributions += year.get("contributionCalendar", {}).get(
-                "totalContributions", 0
-            )
+            calendar = year.get("contributionCalendar", {})
+            self._total_contributions += calendar.get("totalContributions", 0)
+            for week in calendar.get("weeks", []):
+                for day in week.get("contributionDays", []):
+                    self._daily[day["date"]] = day.get("contributionCount", 0)
         return cast(int, self._total_contributions)
 
     @property
+    async def daily_contributions(self) -> Dict[str, int]:
+        if self._daily is None:
+            await self.total_contributions
+        assert self._daily is not None
+        return self._daily
+
+    @property
+    async def first_year(self) -> Optional[int]:
+        await self.total_contributions
+        return min(self._years) if self._years else None
+
+    async def _last_year(self) -> Dict[str, Any]:
+        if self._collection is None:
+            self._collection = (
+                (await self.queries.query(Queries.calendar()))
+                .get("data", {})
+                .get("viewer", {})
+                .get("contributionsCollection", {})
+            )
+        return self._collection
+
+    @property
+    async def calendar(self) -> Dict[str, Any]:
+        return (await self._last_year()).get(
+            "contributionCalendar", {"totalContributions": 0, "weeks": []}
+        )
+
+    @property
+    async def contribution_mix(self) -> Dict[str, int]:
+        c = await self._last_year()
+        return {
+            "Commits": c.get("totalCommitContributions", 0),
+            "Pull requests": c.get("totalPullRequestContributions", 0),
+            "Code reviews": c.get("totalPullRequestReviewContributions", 0),
+            "Issues": c.get("totalIssueContributions", 0),
+            "New repos": c.get("totalRepositoryContributions", 0),
+            "Private": c.get("restrictedContributionsCount", 0),
+        }
+
+    @property
+    async def streaks(self) -> Tuple[int, int]:
+        daily = await self.daily_contributions
+        if not daily:
+            return 0, 0
+        days = sorted(daily.items())
+        longest = run = 0
+        prev: Optional[dt.date] = None
+        for date_str, count in days:
+            date = dt.date.fromisoformat(date_str)
+            if count > 0:
+                run = run + 1 if prev and (date - prev).days == 1 and run else 1
+                longest = max(longest, run)
+            else:
+                run = 0
+            prev = date
+
+        by_date = {dt.date.fromisoformat(k): v for k, v in days}
+        cursor = min(max(by_date), dt.datetime.now(dt.timezone.utc).date())
+        # Today's count is often still 0 when the job runs, so it doesn't break the streak.
+        if by_date.get(cursor, 0) == 0:
+            cursor -= dt.timedelta(days=1)
+        current = 0
+        while by_date.get(cursor, 0) > 0:
+            current += 1
+            cursor -= dt.timedelta(days=1)
+        return current, longest
+
+    @property
     async def lines_changed(self) -> Tuple[int, int]:
-        """
-        :return: count of total lines added, removed, or modified by the user
-        """
         if self._lines_changed is not None:
             return self._lines_changed
         additions = 0
@@ -486,7 +522,6 @@ Languages:
         for repo in await self.repos:
             r = await self.queries.query_rest(f"/repos/{repo}/stats/contributors")
             for author_obj in r:
-                # Handle malformed response from the API by skipping this repo
                 if not isinstance(author_obj, dict) or not isinstance(
                     author_obj.get("author", {}), dict
                 ):
@@ -504,10 +539,6 @@ Languages:
 
     @property
     async def views(self) -> int:
-        """
-        Note: only returns views for the last 14 days (as-per GitHub API)
-        :return: total number of page views the user's projects have received
-        """
         if self._views is not None:
             return self._views
 
@@ -521,15 +552,7 @@ Languages:
         return total
 
 
-###############################################################################
-# Main Function
-###############################################################################
-
-
 async def main() -> None:
-    """
-    Used mostly for testing; this module is not usually run standalone
-    """
     access_token = os.getenv("ACCESS_TOKEN")
     user = os.getenv("GITHUB_ACTOR")
     if access_token is None or user is None:
